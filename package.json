@@ -1,0 +1,16 @@
+{
+  "name": "voice-vault",
+  "private": true,
+  "workspaces": ["apps/*"],
+  "scripts": {
+    "dev": "turbo dev",
+    "build": "turbo build",
+    "test": "turbo test",
+    "test:e2e": "turbo test:e2e",
+    "lint": "turbo lint",
+    "check": "turbo check"
+  },
+  "devDependencies": {
+    "turbo": "^2"
+  }
+}
