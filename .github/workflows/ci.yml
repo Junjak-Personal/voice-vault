@@ -12,16 +12,136 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: oven-sh/setup-bun@v2
+      - uses: actions/cache@v4
         with:
-          bun-version: latest
-      - run: bun install
-
-      # API checks
+          path: |
+            node_modules
+            apps/*/node_modules
+            ~/.bun/install/cache
+          key: gh-bun-${{ hashFiles('bun.lock') }}
+          restore-keys: gh-bun-
+      - run: bun install --frozen-lockfile
       - name: API type check
         run: cd apps/api && ./node_modules/.bin/tsc --noEmit
       - name: API tests
         run: cd apps/api && ./node_modules/.bin/vitest run
-
-      # Web checks
       - name: Web type check
         run: cd apps/web && ./node_modules/.bin/svelte-kit sync && ./node_modules/.bin/svelte-check --tsconfig ./tsconfig.json
+
+  build:
+    runs-on: ubuntu-latest
+    needs: check
+    if: github.ref == 'refs/heads/main' && github.event_name == 'push'
+    environment: production
+    steps:
+      - uses: actions/checkout@v4
+      - uses: oven-sh/setup-bun@v2
+      - uses: actions/cache@v4
+        with:
+          path: |
+            node_modules
+            apps/*/node_modules
+            ~/.bun/install/cache
+          key: gh-bun-${{ hashFiles('bun.lock') }}
+          restore-keys: gh-bun-
+      - run: bun install --frozen-lockfile
+
+      - name: Build API
+        run: cd apps/api && bun run build
+
+      - name: Build Web
+        env:
+          VITE_API_URL: ${{ vars.VITE_API_URL }}
+          VITE_SUPABASE_URL: ${{ vars.VITE_SUPABASE_URL }}
+          VITE_SUPABASE_ANON_KEY: ${{ secrets.VITE_SUPABASE_ANON_KEY }}
+        run: cd apps/web && bun run build
+
+      - name: Package API build
+        run: tar -cf api-build.tar -C apps/api dist package.json
+
+      - name: Package Web build
+        run: tar -cf web-build.tar -C apps/web build package.json
+
+      - name: Upload build artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: build
+          path: |
+            api-build.tar
+            web-build.tar
+          retention-days: 1
+
+  deploy:
+    runs-on: self-hosted
+    needs: build
+    environment: production
+    steps:
+      - name: Download build artifacts
+        uses: actions/download-artifact@v4
+        with:
+          name: build
+
+      - name: Extract API build
+        run: |
+          mkdir -p api
+          tar -xf api-build.tar -C api
+          rm api-build.tar
+
+      - name: Extract Web build
+        run: |
+          mkdir -p web
+          tar -xf web-build.tar -C web
+          rm web-build.tar
+
+      - name: Deploy API container
+        run: |
+          cat > Dockerfile.api <<'DOCKERFILE'
+          FROM node:24-slim
+          WORKDIR /app
+          COPY api/package.json ./
+          RUN npm install --omit=dev
+          COPY api/dist ./dist
+          EXPOSE 4000
+          CMD ["node", "dist/index.js"]
+          DOCKERFILE
+          DOCKER_BUILDKIT=1 docker build -t voice-vault-api -f Dockerfile.api .
+          docker stop voice-vault-api 2>/dev/null && docker rm voice-vault-api 2>/dev/null || true
+          docker run -d \
+            --name voice-vault-api \
+            -p 4000:4000 \
+            -v /home/jun/voice-vault-audio:/data/audio \
+            -e PORT=4000 \
+            -e AUDIO_DIR=/data/audio \
+            -e CORS_ORIGIN=${{ vars.CORS_ORIGIN }} \
+            -e SUPABASE_URL=${{ vars.VITE_SUPABASE_URL }} \
+            -e SUPABASE_SERVICE_ROLE_KEY=${{ secrets.SUPABASE_SERVICE_ROLE_KEY }} \
+            -e OPENAI_API_KEY=${{ secrets.OPENAI_API_KEY }} \
+            voice-vault-api
+
+      - name: Deploy Web container
+        run: |
+          cat > Dockerfile.web <<'DOCKERFILE'
+          FROM node:24-slim
+          WORKDIR /app
+          COPY web/build ./build
+          COPY web/package.json ./
+          RUN npm install --omit=dev
+          EXPOSE 3600
+          ENV PORT=3600
+          CMD ["node", "build"]
+          DOCKERFILE
+          DOCKER_BUILDKIT=1 docker build -t voice-vault-web -f Dockerfile.web .
+          docker stop voice-vault-web 2>/dev/null && docker rm voice-vault-web 2>/dev/null || true
+          docker run -d \
+            --name voice-vault-web \
+            -p 3600:3600 \
+            voice-vault-web
+
+      - name: Cleanup
+        run: rm -rf api web Dockerfile.api Dockerfile.web
+
+      - name: Delete build artifact
+        if: always()
+        uses: geekyeggo/delete-artifact@v5
+        with:
+          name: build
