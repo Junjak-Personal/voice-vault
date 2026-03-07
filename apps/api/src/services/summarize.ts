@@ -18,7 +18,7 @@ Use clear headings and logical grouping. Remove filler words and repetitions whi
 
 export async function summarizeTranscript(rawTranscript: string): Promise<string> {
   const response = await getOpenAI().chat.completions.create({
-    model: 'gpt-4o',
+    model: 'gpt-5-mini',
     messages: [
       { role: 'system', content: SYSTEM_PROMPT },
       { role: 'user', content: rawTranscript },
